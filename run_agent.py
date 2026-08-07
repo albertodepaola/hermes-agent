@@ -3832,6 +3832,45 @@ class AIAgent:
         """Return the last captured RateLimitState, or None."""
         return self._rate_limit_state
 
+    def _capture_request_id(self, http_response: Any) -> None:
+        """Log the provider's server-side request id from response headers.
+
+        OpenAI-compatible providers return an ``x-request-id`` header (Meta's
+        Model API also returns ``x-route``). Capturing it lets a user correlate
+        a Hermes turn with the provider's server-side logs when debugging — the
+        SDK otherwise discards response headers on the parsed object.
+
+        Stashed on ``self._last_provider_request_id`` and logged at INFO with
+        the local turn/api id for cross-referencing. Fail-open: never let header
+        parsing break the agent loop.
+        """
+        if http_response is None:
+            return
+        headers = getattr(http_response, "headers", None)
+        if not headers:
+            return
+        try:
+            req_id = headers.get("x-request-id") or headers.get("x-request-id".title())
+            route = headers.get("x-route")
+            if req_id:
+                self._last_provider_request_id = req_id
+                local_id = getattr(self, "_current_api_request_id", "") or "?"
+                if route:
+                    logger.info(
+                        "provider request id: %s (route=%s, turn=%s)",
+                        req_id, route, local_id,
+                    )
+                else:
+                    logger.info(
+                        "provider request id: %s (turn=%s)", req_id, local_id,
+                    )
+        except Exception:
+            pass  # Never let header parsing break the agent loop
+
+    def get_last_provider_request_id(self):
+        """Return the last captured server-side provider request id, or None."""
+        return getattr(self, "_last_provider_request_id", None)
+
     def _capture_anthropic_response_headers(self, http_response: Any) -> None:
         """Capture out-of-band state from Anthropic Messages response headers.
 

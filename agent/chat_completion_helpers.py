@@ -552,9 +552,34 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
         # MoA is a virtual chat-completions provider backed by the
         # in-process MoAClient facade. Do not rebuild a request-local
         # OpenAI client from the virtual runtime metadata.
-        return agent.client.chat.completions.create(**api_kwargs)
+        return _capture_nonstreaming_request_id(
+            agent, agent.client.chat.completions.create(**api_kwargs)
+        )
     request_client = make_client("chat_completion_request")
-    return request_client.chat.completions.create(**api_kwargs)
+    return _capture_nonstreaming_request_id(
+        agent, request_client.chat.completions.create(**api_kwargs)
+    )
+
+
+def _capture_nonstreaming_request_id(agent, completion):
+    """Log the server-side request id from a parsed non-streaming completion.
+
+    The OpenAI SDK attaches the ``x-request-id`` header value to the parsed
+    object as ``._request_id``. Mirrors the streaming path's
+    ``agent._capture_request_id(stream.response)``. Fail-open.
+    """
+    try:
+        req_id = getattr(completion, "_request_id", None)
+        if req_id and hasattr(agent, "_capture_request_id"):
+            # Reuse the header-based capture by faking a minimal headers dict so
+            # both paths share one log format + stash location.
+            class _H:
+                headers = {"x-request-id": req_id}
+
+            agent._capture_request_id(_H())
+    except Exception:
+        pass
+    return completion
 
 
 def should_use_direct_api_call(agent) -> bool:
@@ -3282,6 +3307,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             response = getattr(raw_stream, "response", None)
             agent._capture_rate_limits(response)
             agent._capture_credits(response)
+            agent._capture_request_id(response)
             agent._stream_diag_capture_response(_diag, response)
             agent._check_openrouter_cache_status(response)
             _writer_token["value"] = claim_stream_writer(agent)
