@@ -8970,11 +8970,50 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         choice = self._normalize_slash_confirm_choice(raw, choices)
         return choice == "once"
 
+    def _confirm_data_policy_model_switch(self, result) -> bool:
+        """Ask for explicit confirmation before switching to a data-training tier.
+
+        Mirrors :meth:`_confirm_expensive_model_switch` for the in-session
+        ``/model`` path. Keyed on the model id (e.g. Meta's ``-contributor``
+        tier), so it is not gated on a known provider. Returns True to proceed,
+        False to cancel.
+        """
+        if not getattr(result, "success", False):
+            return True
+        try:
+            from hermes_cli.model_data_policy_guard import data_training_warning
+
+            warning = data_training_warning(
+                result.new_model,
+                provider=result.target_provider,
+                base_url=result.base_url or self.base_url or "",
+            )
+        except Exception:
+            warning = None
+        if warning is None:
+            return True
+
+        choices = [
+            ("once", "Use anyway", "Use this data-training tier for this session."),
+            ("cancel", "Cancel", "Keep the current model."),
+        ]
+        raw = self._prompt_text_input_modal(
+            title="!!! Contributor Tier — Trains On Your Data !!!",
+            detail=warning.message,
+            choices=choices,
+            timeout=120,
+        )
+        choice = self._normalize_slash_confirm_choice(raw, choices)
+        return choice == "once"
+
     def _confirm_and_apply_model_switch_result(
         self, result, persist_global: bool, custom_providers=None
     ) -> None:
         try:
             if result.success and not self._confirm_expensive_model_switch(result):
+                _cprint("  Model switch cancelled.")
+                return
+            if result.success and not self._confirm_data_policy_model_switch(result):
                 _cprint("  Model switch cancelled.")
                 return
             self._apply_model_switch_result(
@@ -9466,6 +9505,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 logger.debug("preflight-compression switch warning failed: %s", exc)
 
         if not self._confirm_expensive_model_switch(result):
+            _cprint("  Model switch cancelled.")
+            return
+        if not self._confirm_data_policy_model_switch(result):
             _cprint("  Model switch cancelled.")
             return
 
