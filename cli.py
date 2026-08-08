@@ -8970,11 +8970,50 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         choice = self._normalize_slash_confirm_choice(raw, choices)
         return choice == "once"
 
+    def _confirm_data_policy_model_switch(self, result) -> bool:
+        """Ask for explicit confirmation before switching to a data-training tier.
+
+        Mirrors :meth:`_confirm_expensive_model_switch` for the in-session
+        ``/model`` path. Keyed on the model id (e.g. Meta's ``-contributor``
+        tier), so it is not gated on a known provider. Returns True to proceed,
+        False to cancel.
+        """
+        if not getattr(result, "success", False):
+            return True
+        try:
+            from hermes_cli.model_data_policy_guard import data_training_warning
+
+            warning = data_training_warning(
+                result.new_model,
+                provider=result.target_provider,
+                base_url=result.base_url or self.base_url or "",
+            )
+        except Exception:
+            warning = None
+        if warning is None:
+            return True
+
+        choices = [
+            ("once", "Use anyway", "Use this data-training tier for this session."),
+            ("cancel", "Cancel", "Keep the current model."),
+        ]
+        raw = self._prompt_text_input_modal(
+            title="!!! Contributor Tier — Trains On Your Data !!!",
+            detail=warning.message,
+            choices=choices,
+            timeout=120,
+        )
+        choice = self._normalize_slash_confirm_choice(raw, choices)
+        return choice == "once"
+
     def _confirm_and_apply_model_switch_result(
         self, result, persist_global: bool, custom_providers=None
     ) -> None:
         try:
             if result.success and not self._confirm_expensive_model_switch(result):
+                _cprint("  Model switch cancelled.")
+                return
+            if result.success and not self._confirm_data_policy_model_switch(result):
                 _cprint("  Model switch cancelled.")
                 return
             self._apply_model_switch_result(
@@ -9465,7 +9504,37 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             except Exception as exc:
                 logger.debug("preflight-compression switch warning failed: %s", exc)
 
+        # /model dispatches on the UI thread (see handle_enter) so interactive
+        # pickers can hand off the terminal. The confirm modals block on a
+        # response queue answered by that SAME UI thread's Enter handler, so
+        # running them inline deadlocks — the modal never receives its answer
+        # and auto-cancels (the /model-switch-to-a-guarded-tier bug). Offload
+        # confirm+apply to a daemon thread (mirrors the picker path) so the UI
+        # loop stays free to render and answer the modal.
+        if getattr(self, "_app", None):
+            import threading as _threading
+            _threading.Thread(
+                target=self._confirm_and_apply_inline_model_switch,
+                args=(result, persist_global, one_turn),
+                daemon=True,
+            ).start()
+        else:
+            self._confirm_and_apply_inline_model_switch(result, persist_global, one_turn)
+        return
+
+    def _confirm_and_apply_inline_model_switch(self, result, persist_global, one_turn):
+        """Confirm (cost + data-policy) then apply a ``/model <name>`` switch.
+
+        Extracted from :meth:`_handle_model_switch` so it can run on a daemon
+        thread. The confirm modals block on a response queue answered by the
+        UI thread's Enter handler; running them on the UI thread itself
+        deadlocks (the modal auto-cancels). Backgrounding keeps the UI loop
+        free to display and answer the modal.
+        """
         if not self._confirm_expensive_model_switch(result):
+            _cprint("  Model switch cancelled.")
+            return
+        if not self._confirm_data_policy_model_switch(result):
             _cprint("  Model switch cancelled.")
             return
 
