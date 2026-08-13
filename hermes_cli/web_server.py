@@ -6581,6 +6581,34 @@ async def set_model_assignment(body: ModelAssignment, profile: Optional[str] = N
                     "confirm_message": warning.message,
                 }
 
+        # Data-policy warning (e.g. Meta's contributor tier trains on your
+        # prompts). Same request/response confirm shape as the expensive-model
+        # guard above; keyed on the model id, so not gated on a known provider.
+        # ``confirm_reason`` lets the client distinguish which guard fired when
+        # both apply to the same selection.
+        if model and not body.confirm_data_policy:
+            try:
+                from hermes_cli.model_data_policy_guard import data_training_warning
+
+                data_warning = await asyncio.to_thread(
+                    data_training_warning,
+                    model,
+                    provider=provider,
+                    base_url=base_url,
+                )
+            except Exception:
+                data_warning = None
+            if data_warning is not None:
+                return {
+                    "ok": False,
+                    "scope": scope,
+                    "provider": provider,
+                    "model": model,
+                    "confirm_required": True,
+                    "confirm_reason": "data_policy",
+                    "confirm_message": data_warning.message,
+                }
+
         def _apply_assignment():
             with _profile_scope(body.profile or profile):
                 return _apply_model_assignment_sync(

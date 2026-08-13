@@ -145,6 +145,12 @@ class ModelAssignment(BaseModel):
     # ``hermes model`` custom flow collects.
     api_key: str = ""
     confirm_expensive_model: bool = False
+    # Client acknowledges a data-training-tier warning (e.g. Meta's
+    # ``-contributor`` tier trains on your prompts). Mirrors
+    # ``confirm_expensive_model``: the first /api/model/set returns
+    # ``confirm_required`` + ``confirm_message``; the client re-sends with
+    # this flag set to proceed.
+    confirm_data_policy: bool = False
     profile: Optional[str] = None
 
 
